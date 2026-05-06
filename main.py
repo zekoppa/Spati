@@ -87,29 +87,12 @@ class SpatialAudioVisualizer:
         
         return x, y, z
     
-    def _normalize_dbfs(self, dbfs_values, floor_db=-60, ceil_db=0):
-        """
-        Normalize dBFS values to positive linear range [0, 1].
-        Maps [floor_db, ceil_db] to [0, 1].
-        
-        Args:
-            dbfs_values: Array of dBFS values
-            floor_db: Minimum dB value (default -60)
-            ceil_db: Maximum dB value (default 0)
-        
-        Returns:
-            Normalized positive values [0, 1]
-        """
-        clipped = np.clip(dbfs_values, floor_db, ceil_db)
-        normalized = (clipped - floor_db) / (ceil_db - floor_db)
-        return normalized
-    
     def compute_stft_peaks(self):
         """
-        Compute STFT for all channels and extract absolute peak energy.
-        Returns exactly 12 data points (one per channel) representing Max Hold energy.
+        Compute STFT for all channels and extract absolute peak energy (Max Hold).
+        Collapses time domain completely. Returns exactly 1 data point per channel.
         """
-        print("Computing STFT and extracting peak energy per channel...")
+        print("Computing STFT and extracting absolute peak energy per channel...")
         
         # Normalize audio to prevent overflow in STFT
         audio_normalized = self.audio_data.astype(np.float32) / np.iinfo(self.audio_data.dtype).max
@@ -142,41 +125,41 @@ class SpatialAudioVisualizer:
             epsilon = 1e-10
             dbfs = 20 * np.log10(magnitude + epsilon)
             
-            # Max Hold: Get absolute maximum energy across all time and frequency
+            # Absolute Max Hold: single maximum value across all time and frequency bins
             peak_energy = np.max(dbfs)
             
-            # Clip to floor at -60 dBFS for sensible visualization
-            peak_energy_clipped = np.clip(peak_energy, -60, 0)
+            # Clamp to noise floor [-60, 0] dBFS
+            peak_energy_clamped = np.clip(peak_energy, -60, 0)
             
             spatial_coords.append((x, y, z))
-            peak_dbfs_values.append(peak_energy_clipped)
+            peak_dbfs_values.append(peak_energy_clamped)
             channel_labels.append(channel_name)
             
-            print(f"  Channel {ch_idx:2d} ({channel_name:4s}): Azimuth={azimuth:4.0f}°, Elevation={elevation:+3.0f}°, Peak={peak_energy_clipped:+6.1f} dBFS")
+            print(f"  Channel {ch_idx:2d} ({channel_name:4s}): Azimuth={azimuth:4.0f}°, Elevation={elevation:+3.0f}°, Peak={peak_energy_clamped:+6.1f} dBFS")
         
         # Convert to numpy arrays
         spatial_coords = np.array(spatial_coords)
         peak_dbfs_values = np.array(peak_dbfs_values)
         
-        print(f"Total visualization points: {len(peak_dbfs_values)}")
+        print(f"Total visualization points: {len(peak_dbfs_values)} (1 per channel)")
         
         return spatial_coords, peak_dbfs_values, channel_labels
     
     def render_3d_visualization(self, spatial_coords, dbfs_values, channel_labels):
         """
         Create 3D Plotly visualization with unified coloraxis.
-        Massive markers represent peak spatial energy signatures.
+        Renders massive radiating energy spheres with persistent channel labels.
         
         Args:
             spatial_coords: Nx3 array of (x, y, z) coordinates (N=12)
-            dbfs_values: N-length array of peak dBFS values
+            dbfs_values: N-length array of peak dBFS values [-60, 0]
             channel_labels: N-length array of channel names
         """
         print("Rendering 3D visualization...")
         
-        # Normalize dBFS to [0, 1] for marker size scaling
-        normalized_sizes = self._normalize_dbfs(dbfs_values, floor_db=-60, ceil_db=0)
-        # Massive marker scaling: 20 to 120
+        # Normalize dBFS from [-60, 0] to [0, 1] for marker size scaling
+        normalized_sizes = (dbfs_values - (-60)) / (0 - (-60))
+        # Massive marker scaling: 20 to 120 pixels
         marker_sizes = 20 + normalized_sizes * 100
         
         # Extract spatial coordinates
@@ -191,13 +174,15 @@ class SpatialAudioVisualizer:
             x=x_coords,
             y=y_coords,
             z=z_coords,
-            mode='markers',
+            mode='markers+text',
+            text=channel_labels,
+            textposition='top center',
             marker=dict(
                 size=marker_sizes,
-                color=dbfs_values,  # Raw dBFS values for colorbar
-                colorscale='magma',  # Aggressive heatmap
-                cmin=-60,  # Hardcoded colorbar floor
-                cmax=0,    # Hardcoded colorbar ceiling
+                color=dbfs_values,
+                colorscale='magma',
+                cmin=-60,
+                cmax=0,
                 showscale=True,
                 colorbar=dict(
                     title="Peak dBFS",
@@ -208,9 +193,9 @@ class SpatialAudioVisualizer:
                 opacity=0.85,
                 line=dict(width=0)
             ),
-            text=[f"{label}<br>Peak Energy: {dbfs:.1f} dBFS" for label, dbfs in zip(channel_labels, dbfs_values)],
             hoverinfo='text',
-            name='Spatial Audio Peak Energy'
+            hovertext=[f"{label}<br>Peak Energy: {dbfs:.1f} dBFS" for label, dbfs in zip(channel_labels, dbfs_values)],
+            showlegend=False
         ))
         
         # Configure layout
@@ -247,7 +232,7 @@ class SpatialAudioVisualizer:
             height=900,
             margin=dict(l=0, r=200, b=0, t=40),
             hovermode='closest',
-            showlegend=True
+            showlegend=False
         )
         
         # Save and display
