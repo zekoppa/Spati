@@ -33,18 +33,16 @@ class SpatialAudioVisualizer:
         11: ("Rtr", -135, 45),     # Right Top Rear
     }
     
-    def __init__(self, wav_path, stft_nperseg=2048, temporal_downsample=4):
+    def __init__(self, wav_path, stft_nperseg=2048):
         """
         Initialize the spatial audio visualizer.
         
         Args:
             wav_path: Path to input WAV file
             stft_nperseg: STFT window length
-            temporal_downsample: Temporal downsampling factor to reduce point count
         """
         self.wav_path = Path(wav_path)
         self.stft_nperseg = stft_nperseg
-        self.temporal_downsample = temporal_downsample
         self.fs = None
         self.audio_data = None
         self.num_channels = None
@@ -89,35 +87,36 @@ class SpatialAudioVisualizer:
         
         return x, y, z
     
-    def _normalize_dbfs(self, dbfs_values, floor_db=-60):
+    def _normalize_dbfs(self, dbfs_values, floor_db=-60, ceil_db=0):
         """
-        Normalize negative dBFS values to positive linear range for marker sizes.
-        Maps [floor_db, 0] dB to [0, 1].
+        Normalize dBFS values to positive linear range [0, 1].
+        Maps [floor_db, ceil_db] to [0, 1].
         
         Args:
-            dbfs_values: Array of dBFS values (typically -60 to 0)
-            floor_db: Noise floor in dB (default -60)
+            dbfs_values: Array of dBFS values
+            floor_db: Minimum dB value (default -60)
+            ceil_db: Maximum dB value (default 0)
         
         Returns:
             Normalized positive values [0, 1]
         """
-        clipped = np.clip(dbfs_values, floor_db, 0)
-        normalized = (clipped - floor_db) / (-floor_db)
+        clipped = np.clip(dbfs_values, floor_db, ceil_db)
+        normalized = (clipped - floor_db) / (ceil_db - floor_db)
         return normalized
     
     def compute_stft_peaks(self):
         """
-        Compute STFT for all channels and extract peak energy per spatial coordinate.
-        Returns a heavily downsampled dataset suitable for 3D visualization.
+        Compute STFT for all channels and extract absolute peak energy.
+        Returns exactly 12 data points (one per channel) representing Max Hold energy.
         """
-        print("Computing STFT for all channels...")
+        print("Computing STFT and extracting peak energy per channel...")
         
         # Normalize audio to prevent overflow in STFT
         audio_normalized = self.audio_data.astype(np.float32) / np.iinfo(self.audio_data.dtype).max
         
         # Pre-allocate results
         spatial_coords = []
-        dbfs_values = []
+        peak_dbfs_values = []
         channel_labels = []
         
         # Process each channel
@@ -143,43 +142,42 @@ class SpatialAudioVisualizer:
             epsilon = 1e-10
             dbfs = 20 * np.log10(magnitude + epsilon)
             
-            # Temporal downsampling to reduce point count
-            dbfs_downsampled = dbfs[:, ::self.temporal_downsample]
+            # Max Hold: Get absolute maximum energy across all time and frequency
+            peak_energy = np.max(dbfs)
             
-            # Extract peak energy across frequency bins at each time step
-            peak_dbfs = np.max(dbfs_downsampled, axis=0)
+            # Clip to floor at -60 dBFS for sensible visualization
+            peak_energy_clipped = np.clip(peak_energy, -60, 0)
             
-            # Duplicate spatial coordinates for each temporal point
-            num_time_points = peak_dbfs.shape[0]
-            spatial_coords.extend([(x, y, z)] * num_time_points)
-            dbfs_values.extend(peak_dbfs.tolist())
-            channel_labels.extend([channel_name] * num_time_points)
+            spatial_coords.append((x, y, z))
+            peak_dbfs_values.append(peak_energy_clipped)
+            channel_labels.append(channel_name)
             
-            print(f"  Channel {ch_idx:2d} ({channel_name:4s}): Azimuth={azimuth:4.0f}°, Elevation={elevation:+3.0f}°")
+            print(f"  Channel {ch_idx:2d} ({channel_name:4s}): Azimuth={azimuth:4.0f}°, Elevation={elevation:+3.0f}°, Peak={peak_energy_clipped:+6.1f} dBFS")
         
         # Convert to numpy arrays
         spatial_coords = np.array(spatial_coords)
-        dbfs_values = np.array(dbfs_values)
+        peak_dbfs_values = np.array(peak_dbfs_values)
         
-        print(f"Total visualization points: {len(dbfs_values)}")
+        print(f"Total visualization points: {len(peak_dbfs_values)}")
         
-        return spatial_coords, dbfs_values, channel_labels
+        return spatial_coords, peak_dbfs_values, channel_labels
     
     def render_3d_visualization(self, spatial_coords, dbfs_values, channel_labels):
         """
         Create 3D Plotly visualization with unified coloraxis.
+        Massive markers represent peak spatial energy signatures.
         
         Args:
-            spatial_coords: Nx3 array of (x, y, z) coordinates
-            dbfs_values: N-length array of dBFS values
+            spatial_coords: Nx3 array of (x, y, z) coordinates (N=12)
+            dbfs_values: N-length array of peak dBFS values
             channel_labels: N-length array of channel names
         """
         print("Rendering 3D visualization...")
         
-        # Normalize dBFS to positive range for marker sizes
-        normalized_sizes = self._normalize_dbfs(dbfs_values, floor_db=-60)
-        # Scale sizes for visibility (range 2 to 12)
-        marker_sizes = 2 + normalized_sizes * 10
+        # Normalize dBFS to [0, 1] for marker size scaling
+        normalized_sizes = self._normalize_dbfs(dbfs_values, floor_db=-60, ceil_db=0)
+        # Massive marker scaling: 20 to 120
+        marker_sizes = 20 + normalized_sizes * 100
         
         # Extract spatial coordinates
         x_coords = spatial_coords[:, 0]
@@ -198,42 +196,44 @@ class SpatialAudioVisualizer:
                 size=marker_sizes,
                 color=dbfs_values,  # Raw dBFS values for colorbar
                 colorscale='magma',  # Aggressive heatmap
+                cmin=-60,  # Hardcoded colorbar floor
+                cmax=0,    # Hardcoded colorbar ceiling
                 showscale=True,
                 colorbar=dict(
-                    title="dBFS",
+                    title="Peak dBFS",
                     thickness=15,
                     len=0.7,
                     x=1.02
                 ),
-                opacity=0.8,
+                opacity=0.85,
                 line=dict(width=0)
             ),
-            text=[f"{label}<br>dBFS: {dbfs:.1f}" for label, dbfs in zip(channel_labels, dbfs_values)],
+            text=[f"{label}<br>Peak Energy: {dbfs:.1f} dBFS" for label, dbfs in zip(channel_labels, dbfs_values)],
             hoverinfo='text',
-            name='Spatial Audio Energy'
+            name='Spatial Audio Peak Energy'
         ))
         
         # Configure layout
         fig.update_layout(
-            title="ITU-R BS.2051 7.1.4 Spatial Audio Visualization",
+            title="ITU-R BS.2051 7.1.4 Spatial Audio Peak Energy Map",
             scene=dict(
                 xaxis=dict(
                     title="X (Left-Right)",
-                    range=[-1.2, 1.2],
+                    range=[-1.5, 1.5],
                     showgrid=True,
                     gridwidth=1,
                     gridcolor="lightgray"
                 ),
                 yaxis=dict(
                     title="Y (Front-Back)",
-                    range=[-1.2, 1.2],
+                    range=[-1.5, 1.5],
                     showgrid=True,
                     gridwidth=1,
                     gridcolor="lightgray"
                 ),
                 zaxis=dict(
                     title="Z (Down-Up)",
-                    range=[-1.2, 1.2],
+                    range=[-1.5, 1.5],
                     showgrid=True,
                     gridwidth=1,
                     gridcolor="lightgray"
@@ -276,7 +276,7 @@ def main():
         epilog="""
 Examples:
   python main.py audio.wav
-  python main.py audio.wav --stft-window 4096 --temporal-downsample 8
+  python main.py audio.wav --stft-window 4096
         """
     )
     
@@ -290,12 +290,6 @@ Examples:
         type=int,
         default=2048,
         help='STFT window length in samples (default: 2048)'
-    )
-    parser.add_argument(
-        '--temporal-downsample',
-        type=int,
-        default=4,
-        help='Temporal downsampling factor (default: 4)'
     )
     
     args = parser.parse_args()
@@ -312,8 +306,7 @@ Examples:
     # Process
     visualizer = SpatialAudioVisualizer(
         wav_path,
-        stft_nperseg=args.stft_window,
-        temporal_downsample=args.temporal_downsample
+        stft_nperseg=args.stft_window
     )
     
     try:
